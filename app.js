@@ -16,6 +16,9 @@ let refreshTimer = null;
 // Current client chart type
 let clientChartType = 'pie';
 
+// Store last fetched data for re-rendering
+let lastClientData = {};
+
 // Historical data structure - stores daily aggregated data
 let dailyData = {
     // Format: 'YYYY-MM-DD': { total, backend, client, userLaunch, adMetrics: {}, timestamp }
@@ -85,15 +88,23 @@ function init() {
     
     // Set up chart type toggle for client chart
     document.querySelectorAll('.toggle-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
-            e.target.closest('.toggle-btn').classList.add('active');
-            clientChartType = e.target.closest('.toggle-btn').dataset.type;
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
             
-            // Re-render client chart
-            const lastData = getLastFetchedData();
-            if (lastData && lastData.client) {
-                updateClientChart(lastData.client);
+            // Remove active class from all buttons
+            document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+            
+            // Add active class to clicked button
+            this.classList.add('active');
+            
+            // Get chart type from button
+            clientChartType = this.dataset.type;
+            
+            console.log('Switching to chart type:', clientChartType);
+            
+            // Re-render client chart with stored data
+            if (lastClientData && Object.keys(lastClientData).length > 0) {
+                updateClientChart(lastClientData);
             }
         });
     });
@@ -233,6 +244,7 @@ function storeDailyData(data) {
     
     // Extract user_launch from client data
     const userLaunch = client['user_launch'] || 0;
+    console.log('Extracting user_launch:', userLaunch, 'from client data:', client);
     
     // Extract ad metrics (fields starting with 'ad')
     const adMetrics = {};
@@ -252,6 +264,7 @@ function storeDailyData(data) {
             adMetrics: adMetrics,
             timestamp: new Date().toISOString()
         };
+        console.log('Created new daily entry for', today, ':', dailyData[today]);
     } else {
         // Update with latest values (taking the maximum to account for cumulative growth)
         dailyData[today].total = Math.max(dailyData[today].total, total_requests);
@@ -268,6 +281,7 @@ function storeDailyData(data) {
         });
         
         dailyData[today].timestamp = new Date().toISOString();
+        console.log('Updated daily entry for', today, ':', dailyData[today]);
     }
     
     saveDailyData();
@@ -278,16 +292,6 @@ function storeDailyData(data) {
         elements.dataRange.textContent = `${dates[0]} to ${dates[dates.length - 1]}`;
         elements.totalDaysTracked.textContent = dates.length;
     }
-}
-
-// Get last fetched data (for re-rendering)
-function getLastFetchedData() {
-    const today = getTodayDate();
-    return dailyData[today] ? {
-        backend: {},
-        client: {},
-        total_requests: dailyData[today].total
-    } : null;
 }
 
 // Update all dashboard components
@@ -353,6 +357,9 @@ function animateValue(element, endValue) {
 // Update charts
 function updateCharts(data) {
     const { backend = {}, client = {} } = data;
+    
+    // Store client data for chart type toggling
+    lastClientData = client;
     
     updateBackendChart(backend);
     updateClientChart(client);
@@ -432,23 +439,36 @@ function updateUserLaunchMetrics() {
     const today = getTodayDate();
     const yesterday = getDateNDaysAgo(1);
     
+    console.log('Updating user launch metrics. Dates available:', dates.length);
+    console.log('Today:', today, 'Data:', dailyData[today]);
+    
     // Today's launches
-    const todayLaunches = dailyData[today]?.userLaunch || 0;
+    const todayLaunches = (dailyData[today] && dailyData[today].userLaunch) ? dailyData[today].userLaunch : 0;
+    console.log('Today launches:', todayLaunches);
     animateValue(elements.todayLaunches, todayLaunches);
     
     // Yesterday's launches
-    const yesterdayLaunches = dailyData[yesterday]?.userLaunch || 0;
+    const yesterdayLaunches = (dailyData[yesterday] && dailyData[yesterday].userLaunch) ? dailyData[yesterday].userLaunch : 0;
+    console.log('Yesterday launches:', yesterdayLaunches);
     animateValue(elements.yesterdayLaunches, yesterdayLaunches);
     
     // 7-day average
     const last7Days = dates.slice(-7);
-    const weekTotal = last7Days.reduce((sum, date) => sum + (dailyData[date]?.userLaunch || 0), 0);
+    const weekTotal = last7Days.reduce((sum, date) => {
+        const launches = (dailyData[date] && dailyData[date].userLaunch) ? dailyData[date].userLaunch : 0;
+        return sum + launches;
+    }, 0);
     const weekAvg = last7Days.length > 0 ? Math.round(weekTotal / last7Days.length) : 0;
+    console.log('7-day avg:', weekAvg);
     animateValue(elements.weekAvgLaunches, weekAvg);
     
     // 30-day total
     const last30Days = dates.slice(-30);
-    const monthTotal = last30Days.reduce((sum, date) => sum + (dailyData[date]?.userLaunch || 0), 0);
+    const monthTotal = last30Days.reduce((sum, date) => {
+        const launches = (dailyData[date] && dailyData[date].userLaunch) ? dailyData[date].userLaunch : 0;
+        return sum + launches;
+    }, 0);
+    console.log('30-day total:', monthTotal);
     animateValue(elements.monthTotalLaunches, monthTotal);
     
     // Update launch chart
@@ -469,12 +489,19 @@ function updateLaunchChart(days) {
         dataToShow = dates.slice(-days);
     }
     
+    console.log('Updating launch chart with', dataToShow.length, 'days of data');
+    
     const labels = dataToShow.map(date => {
         const d = new Date(date);
         return `${d.getMonth() + 1}/${d.getDate()}`;
     });
     
-    const launchData = dataToShow.map(date => dailyData[date]?.userLaunch || 0);
+    const launchData = dataToShow.map(date => {
+        const launches = (dailyData[date] && dailyData[date].userLaunch) ? dailyData[date].userLaunch : 0;
+        return launches;
+    });
+    
+    console.log('Launch chart data:', launchData);
     
     if (launchChart) {
         launchChart.destroy();
