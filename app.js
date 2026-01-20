@@ -7,38 +7,27 @@ let backendChart = null;
 let clientChart = null;
 let historyChart = null;
 let comparisonChart = null;
+let launchChart = null;
+let adChart = null;
 
 // Auto-refresh timer
 let refreshTimer = null;
 
-// Historical data storage
-let historicalData = {
+// Current client chart type
+let clientChartType = 'pie';
+
+// Historical data structure - stores daily aggregated data
+let dailyData = {
+    // Format: 'YYYY-MM-DD': { total, backend, client, userLaunch, adMetrics: {}, timestamp }
+};
+
+// Real-time session data (for intra-day tracking)
+let sessionData = {
     timestamps: [],
     totalRequests: [],
     backendRequests: [],
     clientRequests: []
 };
-
-// Load historical data from localStorage
-function loadHistoricalData() {
-    const stored = localStorage.getItem('surelyAnalyticsHistory');
-    if (stored) {
-        try {
-            historicalData = JSON.parse(stored);
-        } catch (e) {
-            console.warn('Failed to parse stored data');
-        }
-    }
-}
-
-// Save historical data to localStorage
-function saveHistoricalData() {
-    try {
-        localStorage.setItem('surelyAnalyticsHistory', JSON.stringify(historicalData));
-    } catch (e) {
-        console.warn('Failed to save historical data');
-    }
-}
 
 // DOM Elements
 const elements = {
@@ -50,6 +39,7 @@ const elements = {
     lastUpdated: document.getElementById('lastUpdated'),
     statusIndicator: document.getElementById('statusIndicator'),
     refreshBtn: document.getElementById('refreshBtn'),
+    exportDataBtn: document.getElementById('exportDataBtn'),
     errorMessage: document.getElementById('errorMessage'),
     loadingSpinner: document.getElementById('loadingSpinner'),
     noClientData: document.getElementById('noClientData'),
@@ -58,15 +48,25 @@ const elements = {
     clientGrowth: document.getElementById('clientGrowth'),
     trendValue: document.getElementById('trendValue'),
     peakValue: document.getElementById('peakValue'),
-    avgValue: document.getElementById('avgValue')
+    avgValue: document.getElementById('avgValue'),
+    dataRange: document.getElementById('dataRange'),
+    totalDaysTracked: document.getElementById('totalDaysTracked'),
+    // User Launch elements
+    todayLaunches: document.getElementById('todayLaunches'),
+    yesterdayLaunches: document.getElementById('yesterdayLaunches'),
+    weekAvgLaunches: document.getElementById('weekAvgLaunches'),
+    monthTotalLaunches: document.getElementById('monthTotalLaunches'),
+    // Ad metrics
+    adCardsContainer: document.getElementById('adCardsContainer'),
+    adMetricsSection: document.getElementById('adMetricsSection')
 };
 
 // Initialize dashboard
 function init() {
-    console.log('🚀 SURELY Analytics Dashboard initialized');
+    console.log('SURELY Analytics Dashboard initialized');
     
     // Load historical data
-    loadHistoricalData();
+    loadDailyData();
     
     // Fetch data immediately
     fetchAnalytics();
@@ -80,14 +80,85 @@ function init() {
         restartAutoRefresh();
     });
     
-    // Set up time filter buttons
-    document.querySelectorAll('.time-filter').forEach(btn => {
+    // Set up export button
+    elements.exportDataBtn.addEventListener('click', exportData);
+    
+    // Set up chart type toggle for client chart
+    document.querySelectorAll('.toggle-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
-            document.querySelectorAll('.time-filter').forEach(b => b.classList.remove('active'));
-            e.target.classList.add('active');
-            updateHistoryChart(e.target.dataset.period);
+            document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+            e.target.closest('.toggle-btn').classList.add('active');
+            clientChartType = e.target.closest('.toggle-btn').dataset.type;
+            
+            // Re-render client chart
+            const lastData = getLastFetchedData();
+            if (lastData && lastData.client) {
+                updateClientChart(lastData.client);
+            }
         });
     });
+    
+    // Set up time range selectors
+    document.getElementById('historyTimeRange')?.addEventListener('change', (e) => {
+        if (e.target.value === 'custom') {
+            document.getElementById('customRangeInputs').classList.remove('hidden');
+        } else {
+            document.getElementById('customRangeInputs').classList.add('hidden');
+            updateHistoryChart(e.target.value);
+        }
+    });
+    
+    document.getElementById('applyCustomRange')?.addEventListener('click', () => {
+        const startDate = document.getElementById('startDate').value;
+        const endDate = document.getElementById('endDate').value;
+        if (startDate && endDate) {
+            updateHistoryChart('custom', startDate, endDate);
+        }
+    });
+    
+    document.getElementById('launchTimeRange')?.addEventListener('change', (e) => {
+        updateLaunchChart(parseInt(e.target.value));
+    });
+    
+    document.getElementById('adTimeRange')?.addEventListener('change', (e) => {
+        updateAdChart(e.target.value === 'all' ? 'all' : parseInt(e.target.value));
+    });
+}
+
+// Load daily aggregated data from localStorage
+function loadDailyData() {
+    const stored = localStorage.getItem('surelyDailyData');
+    if (stored) {
+        try {
+            dailyData = JSON.parse(stored);
+            console.log(`Loaded ${Object.keys(dailyData).length} days of historical data`);
+        } catch (e) {
+            console.warn('Failed to parse stored daily data');
+            dailyData = {};
+        }
+    }
+}
+
+// Save daily data to localStorage
+function saveDailyData() {
+    try {
+        localStorage.setItem('surelyDailyData', JSON.stringify(dailyData));
+    } catch (e) {
+        console.warn('Failed to save daily data');
+    }
+}
+
+// Get today's date in YYYY-MM-DD format
+function getTodayDate() {
+    const now = new Date();
+    return now.toISOString().split('T')[0];
+}
+
+// Get date N days ago
+function getDateNDaysAgo(days) {
+    const date = new Date();
+    date.setDate(date.getDate() - days);
+    return date.toISOString().split('T')[0];
 }
 
 // Fetch analytics data from backend
@@ -96,7 +167,7 @@ async function fetchAnalytics() {
     hideError();
     
     try {
-        console.log('📡 Fetching analytics from:', API_URL);
+        console.log('Fetching analytics from:', API_URL);
         
         const response = await fetch(API_URL, {
             method: 'GET',
@@ -110,17 +181,18 @@ async function fetchAnalytics() {
         }
         
         const data = await response.json();
-        console.log('✅ Data received:', data);
+        console.log('Data received:', data);
         
-        // Store historical data
-        storeHistoricalDataPoint(data);
+        // Store both session and daily data
+        storeSessionData(data);
+        storeDailyData(data);
         
         updateDashboard(data);
         updateLastUpdated();
         setStatusOnline();
         
     } catch (error) {
-        console.error('❌ Error fetching analytics:', error);
+        console.error('Error fetching analytics:', error);
         showError(`Failed to fetch analytics: ${error.message}`);
         setStatusOffline();
     } finally {
@@ -128,29 +200,94 @@ async function fetchAnalytics() {
     }
 }
 
-// Store a data point in historical records
-function storeHistoricalDataPoint(data) {
+// Store session data (intra-day tracking)
+function storeSessionData(data) {
     const now = new Date();
     const { backend = {}, client = {}, total_requests = 0 } = data;
     
     const backendTotal = Object.values(backend).reduce((sum, val) => sum + val, 0);
     const clientTotal = Object.values(client).reduce((sum, val) => sum + val, 0);
     
-    historicalData.timestamps.push(now.toISOString());
-    historicalData.totalRequests.push(total_requests);
-    historicalData.backendRequests.push(backendTotal);
-    historicalData.clientRequests.push(clientTotal);
+    sessionData.timestamps.push(now.toISOString());
+    sessionData.totalRequests.push(total_requests);
+    sessionData.backendRequests.push(backendTotal);
+    sessionData.clientRequests.push(clientTotal);
     
-    // Keep only last 100 data points to avoid storage issues
+    // Keep only last 100 session points
     const maxPoints = 100;
-    if (historicalData.timestamps.length > maxPoints) {
-        historicalData.timestamps = historicalData.timestamps.slice(-maxPoints);
-        historicalData.totalRequests = historicalData.totalRequests.slice(-maxPoints);
-        historicalData.backendRequests = historicalData.backendRequests.slice(-maxPoints);
-        historicalData.clientRequests = historicalData.clientRequests.slice(-maxPoints);
+    if (sessionData.timestamps.length > maxPoints) {
+        sessionData.timestamps = sessionData.timestamps.slice(-maxPoints);
+        sessionData.totalRequests = sessionData.totalRequests.slice(-maxPoints);
+        sessionData.backendRequests = sessionData.backendRequests.slice(-maxPoints);
+        sessionData.clientRequests = sessionData.clientRequests.slice(-maxPoints);
+    }
+}
+
+// Store daily aggregated data
+function storeDailyData(data) {
+    const today = getTodayDate();
+    const { backend = {}, client = {}, total_requests = 0 } = data;
+    
+    const backendTotal = Object.values(backend).reduce((sum, val) => sum + val, 0);
+    const clientTotal = Object.values(client).reduce((sum, val) => sum + val, 0);
+    
+    // Extract user_launch from client data
+    const userLaunch = client['user_launch'] || 0;
+    
+    // Extract ad metrics (fields starting with 'ad')
+    const adMetrics = {};
+    Object.keys(client).forEach(key => {
+        if (key.startsWith('ad')) {
+            adMetrics[key] = client[key];
+        }
+    });
+    
+    // Update or create today's entry
+    if (!dailyData[today]) {
+        dailyData[today] = {
+            total: total_requests,
+            backend: backendTotal,
+            client: clientTotal,
+            userLaunch: userLaunch,
+            adMetrics: adMetrics,
+            timestamp: new Date().toISOString()
+        };
+    } else {
+        // Update with latest values (taking the maximum to account for cumulative growth)
+        dailyData[today].total = Math.max(dailyData[today].total, total_requests);
+        dailyData[today].backend = Math.max(dailyData[today].backend, backendTotal);
+        dailyData[today].client = Math.max(dailyData[today].client, clientTotal);
+        dailyData[today].userLaunch = Math.max(dailyData[today].userLaunch, userLaunch);
+        
+        // Update ad metrics
+        Object.keys(adMetrics).forEach(key => {
+            if (!dailyData[today].adMetrics[key]) {
+                dailyData[today].adMetrics[key] = 0;
+            }
+            dailyData[today].adMetrics[key] = Math.max(dailyData[today].adMetrics[key], adMetrics[key]);
+        });
+        
+        dailyData[today].timestamp = new Date().toISOString();
     }
     
-    saveHistoricalData();
+    saveDailyData();
+    
+    // Update data range display
+    const dates = Object.keys(dailyData).sort();
+    if (dates.length > 0) {
+        elements.dataRange.textContent = `${dates[0]} to ${dates[dates.length - 1]}`;
+        elements.totalDaysTracked.textContent = dates.length;
+    }
+}
+
+// Get last fetched data (for re-rendering)
+function getLastFetchedData() {
+    const today = getTodayDate();
+    return dailyData[today] ? {
+        backend: {},
+        client: {},
+        total_requests: dailyData[today].total
+    } : null;
 }
 
 // Update all dashboard components
@@ -159,6 +296,8 @@ function updateDashboard(data) {
     updateCharts(data);
     updateGrowthMetrics();
     updateHistoricalCharts();
+    updateUserLaunchMetrics();
+    updateAdMetrics();
 }
 
 // Update overview cards
@@ -221,24 +360,24 @@ function updateCharts(data) {
 
 // Update growth badges
 function updateGrowthBadges() {
-    if (historicalData.totalRequests.length < 2) {
+    const dates = Object.keys(dailyData).sort();
+    
+    if (dates.length < 2) {
         elements.totalGrowth.textContent = '—';
         elements.backendGrowth.textContent = '—';
         elements.clientGrowth.textContent = '—';
         return;
     }
     
-    const len = historicalData.totalRequests.length;
-    const prevTotal = historicalData.totalRequests[len - 2];
-    const currTotal = historicalData.totalRequests[len - 1];
-    const prevBackend = historicalData.backendRequests[len - 2];
-    const currBackend = historicalData.backendRequests[len - 1];
-    const prevClient = historicalData.clientRequests[len - 2];
-    const currClient = historicalData.clientRequests[len - 1];
+    const today = dates[dates.length - 1];
+    const yesterday = dates[dates.length - 2];
     
-    updateGrowthBadge(elements.totalGrowth, prevTotal, currTotal);
-    updateGrowthBadge(elements.backendGrowth, prevBackend, currBackend);
-    updateGrowthBadge(elements.clientGrowth, prevClient, currClient);
+    const todayData = dailyData[today];
+    const yesterdayData = dailyData[yesterday];
+    
+    updateGrowthBadge(elements.totalGrowth, yesterdayData.total, todayData.total);
+    updateGrowthBadge(elements.backendGrowth, yesterdayData.backend, todayData.backend);
+    updateGrowthBadge(elements.clientGrowth, yesterdayData.client, todayData.client);
 }
 
 function updateGrowthBadge(element, prev, curr) {
@@ -259,30 +398,311 @@ function updateGrowthBadge(element, prev, curr) {
 
 // Update growth metrics section
 function updateGrowthMetrics() {
-    if (historicalData.totalRequests.length === 0) {
+    const dates = Object.keys(dailyData).sort();
+    
+    if (dates.length === 0) {
         elements.trendValue.textContent = 'No data yet';
         elements.peakValue.textContent = '—';
         elements.avgValue.textContent = '—';
         return;
     }
     
-    // Calculate trend
-    const recentData = historicalData.totalRequests.slice(-10);
-    if (recentData.length >= 2) {
-        const first = recentData[0];
-        const last = recentData[recentData.length - 1];
-        const trend = last > first ? 'Growing ↗' : last < first ? 'Declining ↘' : 'Stable →';
+    // Calculate trend (last 7 days)
+    const recentDates = dates.slice(-7);
+    if (recentDates.length >= 2) {
+        const first = dailyData[recentDates[0]].total;
+        const last = dailyData[recentDates[recentDates.length - 1]].total;
+        const trend = last > first ? 'Growing' : last < first ? 'Declining' : 'Stable';
         elements.trendValue.textContent = trend;
     }
     
     // Calculate peak
-    const peak = Math.max(...historicalData.totalRequests);
+    const peak = Math.max(...dates.map(date => dailyData[date].total));
     elements.peakValue.textContent = peak.toLocaleString();
     
     // Calculate average
-    const sum = historicalData.totalRequests.reduce((a, b) => a + b, 0);
-    const avg = Math.round(sum / historicalData.totalRequests.length);
+    const sum = dates.reduce((acc, date) => acc + dailyData[date].total, 0);
+    const avg = Math.round(sum / dates.length);
     elements.avgValue.textContent = avg.toLocaleString();
+}
+
+// Update user launch metrics
+function updateUserLaunchMetrics() {
+    const dates = Object.keys(dailyData).sort();
+    const today = getTodayDate();
+    const yesterday = getDateNDaysAgo(1);
+    
+    // Today's launches
+    const todayLaunches = dailyData[today]?.userLaunch || 0;
+    animateValue(elements.todayLaunches, todayLaunches);
+    
+    // Yesterday's launches
+    const yesterdayLaunches = dailyData[yesterday]?.userLaunch || 0;
+    animateValue(elements.yesterdayLaunches, yesterdayLaunches);
+    
+    // 7-day average
+    const last7Days = dates.slice(-7);
+    const weekTotal = last7Days.reduce((sum, date) => sum + (dailyData[date]?.userLaunch || 0), 0);
+    const weekAvg = last7Days.length > 0 ? Math.round(weekTotal / last7Days.length) : 0;
+    animateValue(elements.weekAvgLaunches, weekAvg);
+    
+    // 30-day total
+    const last30Days = dates.slice(-30);
+    const monthTotal = last30Days.reduce((sum, date) => sum + (dailyData[date]?.userLaunch || 0), 0);
+    animateValue(elements.monthTotalLaunches, monthTotal);
+    
+    // Update launch chart
+    updateLaunchChart(30);
+}
+
+// Update launch chart
+function updateLaunchChart(days) {
+    const ctx = document.getElementById('launchChart');
+    if (!ctx) return;
+    
+    const dates = Object.keys(dailyData).sort();
+    let dataToShow = [];
+    
+    if (days === 'all' || days === null) {
+        dataToShow = dates;
+    } else {
+        dataToShow = dates.slice(-days);
+    }
+    
+    const labels = dataToShow.map(date => {
+        const d = new Date(date);
+        return `${d.getMonth() + 1}/${d.getDate()}`;
+    });
+    
+    const launchData = dataToShow.map(date => dailyData[date]?.userLaunch || 0);
+    
+    if (launchChart) {
+        launchChart.destroy();
+    }
+    
+    launchChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'User Launches',
+                data: launchData,
+                borderColor: 'rgba(196, 30, 58, 1)',
+                backgroundColor: 'rgba(196, 30, 58, 0.1)',
+                borderWidth: 3,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 4,
+                pointHoverRadius: 6,
+                pointBackgroundColor: 'rgba(196, 30, 58, 1)',
+                pointBorderColor: '#ffffff',
+                pointBorderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            interaction: {
+                mode: 'index',
+                intersect: false
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                    padding: 12,
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: '#C41E3A',
+                    borderWidth: 2,
+                    callbacks: {
+                        label: function(context) {
+                            return `Launches: ${context.parsed.y}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 11 },
+                        precision: 0
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.1)'
+                    }
+                },
+                x: {
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 10 },
+                        maxRotation: 45,
+                        minRotation: 45
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.05)'
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Update ad metrics
+function updateAdMetrics() {
+    const dates = Object.keys(dailyData).sort();
+    if (dates.length === 0) return;
+    
+    const today = getTodayDate();
+    const todayData = dailyData[today];
+    
+    if (!todayData || Object.keys(todayData.adMetrics).length === 0) {
+        elements.adMetricsSection.style.display = 'none';
+        return;
+    }
+    
+    elements.adMetricsSection.style.display = 'block';
+    
+    // Clear existing ad cards
+    elements.adCardsContainer.innerHTML = '';
+    
+    // Create cards for each ad metric
+    Object.entries(todayData.adMetrics).forEach(([key, value]) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        
+        const displayName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        
+        card.innerHTML = `
+            <div class="card-header">
+                <h3>${displayName}</h3>
+            </div>
+            <p class="card-value">${value.toLocaleString()}</p>
+            <div class="card-footer">Total interactions</div>
+        `;
+        
+        elements.adCardsContainer.appendChild(card);
+    });
+    
+    // Update ad chart
+    updateAdChart(30);
+}
+
+// Update ad chart
+function updateAdChart(days) {
+    const ctx = document.getElementById('adChart');
+    if (!ctx) return;
+    
+    const dates = Object.keys(dailyData).sort();
+    let dataToShow = [];
+    
+    if (days === 'all') {
+        dataToShow = dates;
+    } else {
+        dataToShow = dates.slice(-days);
+    }
+    
+    // Collect all unique ad metrics
+    const allAdMetrics = new Set();
+    dataToShow.forEach(date => {
+        if (dailyData[date].adMetrics) {
+            Object.keys(dailyData[date].adMetrics).forEach(key => allAdMetrics.add(key));
+        }
+    });
+    
+    if (allAdMetrics.size === 0) return;
+    
+    const labels = dataToShow.map(date => {
+        const d = new Date(date);
+        return `${d.getMonth() + 1}/${d.getDate()}`;
+    });
+    
+    const datasets = Array.from(allAdMetrics).map((metric, index) => {
+        const colors = [
+            { border: 'rgba(196, 30, 58, 1)', bg: 'rgba(196, 30, 58, 0.1)' },
+            { border: 'rgba(230, 57, 70, 1)', bg: 'rgba(230, 57, 70, 0.1)' },
+            { border: 'rgba(139, 19, 41, 1)', bg: 'rgba(139, 19, 41, 0.1)' },
+            { border: 'rgba(255, 69, 87, 1)', bg: 'rgba(255, 69, 87, 0.1)' }
+        ];
+        
+        const color = colors[index % colors.length];
+        const displayName = metric.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        
+        return {
+            label: displayName,
+            data: dataToShow.map(date => dailyData[date].adMetrics?.[metric] || 0),
+            borderColor: color.border,
+            backgroundColor: color.bg,
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+        };
+    });
+    
+    if (adChart) {
+        adChart.destroy();
+    }
+    
+    adChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: datasets
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            interaction: {
+                mode: 'index',
+                intersect: false
+            },
+            plugins: {
+                legend: {
+                    labels: {
+                        color: '#ffffff',
+                        font: { size: 11 },
+                        padding: 10
+                    }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                    padding: 12,
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: '#C41E3A',
+                    borderWidth: 2
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 11 },
+                        precision: 0
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.1)'
+                    }
+                },
+                x: {
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 10 },
+                        maxRotation: 45,
+                        minRotation: 45
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.05)'
+                    }
+                }
+            }
+        }
+    });
 }
 
 // Update backend chart
@@ -354,7 +774,7 @@ function updateBackendChart(backendData) {
     });
 }
 
-// Update client chart
+// Update client chart (with toggle between pie and bar)
 function updateClientChart(clientData) {
     const hasData = Object.keys(clientData).length > 0;
     
@@ -374,49 +794,109 @@ function updateClientChart(clientData) {
     const labels = Object.keys(clientData);
     const values = Object.values(clientData);
     
-    // Generate colors
-    const colors = generateColors(labels.length);
-    
     if (clientChart) {
         clientChart.destroy();
     }
     
-    clientChart = new Chart(ctx, {
-        type: 'pie',
-        data: {
-            labels: labels,
-            datasets: [{
-                data: values,
-                backgroundColor: colors.background,
-                borderColor: colors.border,
-                borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: true,
-            plugins: {
-                legend: {
-                    position: 'bottom',
-                    labels: {
-                        color: '#ffffff',
-                        padding: 15,
-                        font: { size: 11 }
+    if (clientChartType === 'pie') {
+        // Generate colors
+        const colors = generateColors(labels.length);
+        
+        clientChart = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: values,
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#ffffff',
+                            padding: 15,
+                            font: { size: 11 }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                        padding: 12,
+                        titleColor: '#ffffff',
+                        bodyColor: '#ffffff',
+                        borderColor: '#C41E3A',
+                        borderWidth: 2,
+                        titleFont: { size: 14, weight: 'bold' },
+                        bodyFont: { size: 13 }
                     }
-                },
-                tooltip: {
-                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
-                    padding: 12,
-                    titleColor: '#ffffff',
-                    bodyColor: '#ffffff',
-                    borderColor: '#C41E3A',
-                    borderWidth: 2,
-                    titleFont: { size: 14, weight: 'bold' },
-                    bodyFont: { size: 13 }
                 }
             }
-        }
-    });
+        });
+    } else {
+        // Bar chart
+        clientChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Actions',
+                    data: values,
+                    backgroundColor: 'rgba(128, 128, 128, 0.8)',
+                    borderColor: 'rgba(128, 128, 128, 1)',
+                    borderWidth: 2,
+                    borderRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                        padding: 12,
+                        titleColor: '#ffffff',
+                        bodyColor: '#ffffff',
+                        borderColor: '#C41E3A',
+                        borderWidth: 2,
+                        titleFont: { size: 14, weight: 'bold' },
+                        bodyFont: { size: 13 }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            color: '#b3b3b3',
+                            font: { size: 11 }
+                        },
+                        grid: {
+                            color: 'rgba(196, 30, 58, 0.1)'
+                        }
+                    },
+                    x: {
+                        ticks: {
+                            color: '#b3b3b3',
+                            font: { size: 11 },
+                            maxRotation: 45,
+                            minRotation: 45
+                        },
+                        grid: {
+                            display: false
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 // Generate colors for pie chart
@@ -444,39 +924,138 @@ function generateColors(count) {
 
 // Update historical charts
 function updateHistoricalCharts() {
-    updateHistoryChart('all');
+    updateHistoryChart('30d');
     updateComparisonChart();
 }
 
 // Update history timeline chart
-function updateHistoryChart(period = 'all') {
-    if (historicalData.timestamps.length === 0) return;
-    
+function updateHistoryChart(period, customStart = null, customEnd = null) {
     const ctx = document.getElementById('historyChart');
     if (!ctx) return;
     
-    let dataToShow = { timestamps: [], total: [], backend: [], client: [] };
+    const dates = Object.keys(dailyData).sort();
+    let dataToShow = [];
     
-    // Filter data based on period
-    const now = new Date();
-    historicalData.timestamps.forEach((timestamp, index) => {
-        const date = new Date(timestamp);
-        let include = false;
-        
-        if (period === 'all') {
-            include = true;
-        } else if (period === 'hour') {
-            include = (now - date) <= 3600000; // 1 hour
-        } else if (period === 'day') {
-            include = (now - date) <= 86400000; // 24 hours
+    if (period === 'custom' && customStart && customEnd) {
+        dataToShow = dates.filter(date => date >= customStart && date <= customEnd);
+    } else if (period === 'all') {
+        dataToShow = dates;
+    } else if (period === '24h') {
+        // Use session data for 24h view
+        updateSessionHistoryChart();
+        return;
+    } else {
+        const daysMap = { '7d': 7, '30d': 30, '90d': 90 };
+        const days = daysMap[period] || 30;
+        dataToShow = dates.slice(-days);
+    }
+    
+    const labels = dataToShow.map(date => {
+        const d = new Date(date);
+        return `${d.getMonth() + 1}/${d.getDate()}`;
+    });
+    
+    const totalData = dataToShow.map(date => dailyData[date].total);
+    const backendData = dataToShow.map(date => dailyData[date].backend);
+    const clientData = dataToShow.map(date => dailyData[date].client);
+    
+    if (historyChart) {
+        historyChart.destroy();
+    }
+    
+    historyChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Total Requests',
+                    data: totalData,
+                    borderColor: 'rgba(196, 30, 58, 1)',
+                    backgroundColor: 'rgba(196, 30, 58, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4
+                },
+                {
+                    label: 'Backend',
+                    data: backendData,
+                    borderColor: 'rgba(230, 57, 70, 1)',
+                    backgroundColor: 'rgba(230, 57, 70, 0.1)',
+                    borderWidth: 2,
+                    fill: false,
+                    tension: 0.4
+                },
+                {
+                    label: 'Client',
+                    data: clientData,
+                    borderColor: 'rgba(179, 179, 179, 1)',
+                    backgroundColor: 'rgba(179, 179, 179, 0.1)',
+                    borderWidth: 2,
+                    fill: false,
+                    tension: 0.4
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            interaction: {
+                mode: 'index',
+                intersect: false
+            },
+            plugins: {
+                legend: {
+                    labels: {
+                        color: '#ffffff',
+                        font: { size: 12 },
+                        padding: 15
+                    }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                    padding: 12,
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: '#C41E3A',
+                    borderWidth: 2
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 11 }
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.1)'
+                    }
+                },
+                x: {
+                    ticks: {
+                        color: '#b3b3b3',
+                        font: { size: 10 },
+                        maxRotation: 45,
+                        minRotation: 45
+                    },
+                    grid: {
+                        color: 'rgba(196, 30, 58, 0.05)'
+                    }
+                }
+            }
         }
-        
-        if (include) {
-            dataToShow.timestamps.push(date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }));
-            dataToShow.total.push(historicalData.totalRequests[index]);
-            dataToShow.backend.push(historicalData.backendRequests[index]);
-            dataToShow.client.push(historicalData.clientRequests[index]);
-        }
+    });
+}
+
+// Update session history chart (for 24h view)
+function updateSessionHistoryChart() {
+    const ctx = document.getElementById('historyChart');
+    if (!ctx) return;
+    
+    const labels = sessionData.timestamps.map(ts => {
+        const date = new Date(ts);
+        return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     });
     
     if (historyChart) {
@@ -486,11 +1065,11 @@ function updateHistoryChart(period = 'all') {
     historyChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: dataToShow.timestamps,
+            labels: labels,
             datasets: [
                 {
                     label: 'Total Requests',
-                    data: dataToShow.total,
+                    data: sessionData.totalRequests,
                     borderColor: 'rgba(196, 30, 58, 1)',
                     backgroundColor: 'rgba(196, 30, 58, 0.1)',
                     borderWidth: 3,
@@ -499,7 +1078,7 @@ function updateHistoryChart(period = 'all') {
                 },
                 {
                     label: 'Backend',
-                    data: dataToShow.backend,
+                    data: sessionData.backendRequests,
                     borderColor: 'rgba(230, 57, 70, 1)',
                     backgroundColor: 'rgba(230, 57, 70, 0.1)',
                     borderWidth: 2,
@@ -508,7 +1087,7 @@ function updateHistoryChart(period = 'all') {
                 },
                 {
                     label: 'Client',
-                    data: dataToShow.client,
+                    data: sessionData.clientRequests,
                     borderColor: 'rgba(179, 179, 179, 1)',
                     backgroundColor: 'rgba(179, 179, 179, 0.1)',
                     borderWidth: 2,
@@ -570,16 +1149,17 @@ function updateHistoryChart(period = 'all') {
 
 // Update comparison chart
 function updateComparisonChart() {
-    if (historicalData.timestamps.length === 0) return;
-    
     const ctx = document.getElementById('comparisonChart');
     if (!ctx) return;
     
-    // Get average values per hour for better comparison
-    const avgBackend = historicalData.backendRequests.reduce((a, b) => a + b, 0) / historicalData.backendRequests.length;
-    const avgClient = historicalData.clientRequests.reduce((a, b) => a + b, 0) / historicalData.clientRequests.length;
-    const maxBackend = Math.max(...historicalData.backendRequests);
-    const maxClient = Math.max(...historicalData.clientRequests);
+    const dates = Object.keys(dailyData).sort();
+    if (dates.length === 0) return;
+    
+    // Calculate averages and peaks from daily data
+    const backendAvg = dates.reduce((sum, date) => sum + dailyData[date].backend, 0) / dates.length;
+    const clientAvg = dates.reduce((sum, date) => sum + dailyData[date].client, 0) / dates.length;
+    const backendPeak = Math.max(...dates.map(date => dailyData[date].backend));
+    const clientPeak = Math.max(...dates.map(date => dailyData[date].client));
     
     if (comparisonChart) {
         comparisonChart.destroy();
@@ -592,7 +1172,7 @@ function updateComparisonChart() {
             datasets: [
                 {
                     label: 'Backend',
-                    data: [Math.round(avgBackend), maxBackend],
+                    data: [Math.round(backendAvg), backendPeak],
                     backgroundColor: 'rgba(196, 30, 58, 0.8)',
                     borderColor: 'rgba(196, 30, 58, 1)',
                     borderWidth: 2,
@@ -600,7 +1180,7 @@ function updateComparisonChart() {
                 },
                 {
                     label: 'Client',
-                    data: [Math.round(avgClient), maxClient],
+                    data: [Math.round(clientAvg), clientPeak],
                     backgroundColor: 'rgba(128, 128, 128, 0.8)',
                     borderColor: 'rgba(128, 128, 128, 1)',
                     borderWidth: 2,
@@ -653,6 +1233,30 @@ function updateComparisonChart() {
     });
 }
 
+// Export data functionality
+function exportData() {
+    const dataToExport = {
+        dailyData: dailyData,
+        sessionData: sessionData,
+        exportDate: new Date().toISOString(),
+        totalDays: Object.keys(dailyData).length
+    };
+    
+    const dataStr = JSON.stringify(dataToExport, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    
+    const url = URL.createObjectURL(dataBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `surely-analytics-${getTodayDate()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    console.log('Data exported successfully');
+}
+
 // Update last updated timestamp
 function updateLastUpdated() {
     const now = new Date();
@@ -666,12 +1270,12 @@ function updateLastUpdated() {
 
 // Set status indicator
 function setStatusOnline() {
-    elements.statusIndicator.textContent = '● Online';
+    elements.statusIndicator.textContent = 'Online';
     elements.statusIndicator.className = 'stat-value status-online';
 }
 
 function setStatusOffline() {
-    elements.statusIndicator.textContent = '● Offline';
+    elements.statusIndicator.textContent = 'Offline';
     elements.statusIndicator.className = 'stat-value';
     elements.statusIndicator.style.color = '#ef4444';
 }
@@ -701,11 +1305,11 @@ function hideError() {
 // Start auto-refresh
 function startAutoRefresh() {
     refreshTimer = setInterval(() => {
-        console.log('⏰ Auto-refreshing...');
+        console.log('Auto-refreshing...');
         fetchAnalytics();
     }, REFRESH_INTERVAL);
     
-    console.log(`⏱️ Auto-refresh enabled (every ${REFRESH_INTERVAL / 1000}s)`);
+    console.log(`Auto-refresh enabled (every ${REFRESH_INTERVAL / 1000}s)`);
 }
 
 // Restart auto-refresh timer
