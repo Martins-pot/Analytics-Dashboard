@@ -71,6 +71,9 @@ function init() {
     // Load historical data
     loadDailyData();
     
+    // Initialize growth badges as hidden initially
+    updateGrowthBadges();
+    
     // Fetch data immediately
     fetchAnalytics();
     
@@ -242,9 +245,9 @@ function storeDailyData(data) {
     const backendTotal = Object.values(backend).reduce((sum, val) => sum + val, 0);
     const clientTotal = Object.values(client).reduce((sum, val) => sum + val, 0);
     
-    // Extract user_launch from client data
-    const userLaunch = client['user_launch'] || 0;
-    console.log('Extracting user_launch:', userLaunch, 'from client data:', client);
+    // Extract user launch from client data (note: field has a space, not underscore)
+    const userLaunch = client['user launch'] || 0;
+    console.log('Extracting user launch:', userLaunch, 'from client data:', client);
     
     // Extract ad metrics (fields starting with 'ad')
     const adMetrics = {};
@@ -369,10 +372,14 @@ function updateCharts(data) {
 function updateGrowthBadges() {
     const dates = Object.keys(dailyData).sort();
     
+    console.log('Updating growth badges. Available dates:', dates.length);
+    
     if (dates.length < 2) {
-        elements.totalGrowth.textContent = '—';
-        elements.backendGrowth.textContent = '—';
-        elements.clientGrowth.textContent = '—';
+        // Hide all growth badges if we don't have at least 2 days of data
+        console.log('Hiding growth badges - insufficient data (need 2 days, have', dates.length, ')');
+        elements.totalGrowth.classList.add('hidden-badge');
+        elements.backendGrowth.classList.add('hidden-badge');
+        elements.clientGrowth.classList.add('hidden-badge');
         return;
     }
     
@@ -382,24 +389,35 @@ function updateGrowthBadges() {
     const todayData = dailyData[today];
     const yesterdayData = dailyData[yesterday];
     
-    updateGrowthBadge(elements.totalGrowth, yesterdayData.total, todayData.total);
-    updateGrowthBadge(elements.backendGrowth, yesterdayData.backend, todayData.backend);
-    updateGrowthBadge(elements.clientGrowth, yesterdayData.client, todayData.client);
+    console.log('Comparing', yesterday, 'to', today);
+    console.log('Yesterday:', yesterdayData);
+    console.log('Today:', todayData);
+    
+    updateGrowthBadge(elements.totalGrowth, yesterdayData.total, todayData.total, 'Total');
+    updateGrowthBadge(elements.backendGrowth, yesterdayData.backend, todayData.backend, 'Backend');
+    updateGrowthBadge(elements.clientGrowth, yesterdayData.client, todayData.client, 'Client');
 }
 
-function updateGrowthBadge(element, prev, curr) {
+function updateGrowthBadge(element, prev, curr, label) {
     const change = curr - prev;
-    const percent = prev > 0 ? ((change / prev) * 100).toFixed(1) : 0;
+    
+    console.log(`${label} growth: ${prev} -> ${curr} = ${change}`);
     
     if (change > 0) {
         element.textContent = `+${change}`;
-        element.classList.remove('negative');
+        element.classList.remove('negative', 'hidden-badge');
+        element.classList.add('positive');
+        console.log(`${label} badge: showing +${change}`);
     } else if (change < 0) {
         element.textContent = `${change}`;
+        element.classList.remove('positive', 'hidden-badge');
         element.classList.add('negative');
+        console.log(`${label} badge: showing ${change}`);
     } else {
-        element.textContent = '—';
-        element.classList.remove('negative');
+        // No change - hide the badge completely
+        element.classList.add('hidden-badge');
+        element.classList.remove('positive', 'negative');
+        console.log(`${label} badge: hiding (no change)`);
     }
 }
 
